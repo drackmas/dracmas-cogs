@@ -157,6 +157,14 @@ class Post(commands.Cog):
         await self.config.guild(ctx.guild).iftttfacebook.set(facebook_key)
         embed = discord.Embed(title = "Post Config Facebook", description = "Facebook Configuration Set.", color = discord.Color.green())
         await ctx.send(embed=embed)
+        
+    @config.command(name="tumblr_api", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def tumblr_api(self, ctx, tumblr_key): 
+        """Store the IFTTT Facebook Configuragion KEY."""
+        await self.config.guild(ctx.guild).ifttttumblr.set(tumblr_key)
+        embed = discord.Embed(title = "Post Config Facebook", description = "Facebook Configuration Set.", color = discord.Color.green())
+        await ctx.send(embed=embed)
 
     @post.group(name="test", pass_context=True) #nested-group
     @commands.has_role("Bot-Dev")
@@ -184,3 +192,14 @@ class Post(commands.Cog):
         facebook_key = await self.config.guild(ctx.guild).iftttfacebook()
         ifttt = IftttWebhook(ifttt_key)
         ifttt.trigger(facebook_key, value1=post_title, value2=post_body, value3='none')
+        
+    @test.command(name="tumblr", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def tumblr(self, ctx): 
+        """Post to Facebook."""
+        post_title = await self.config.user(ctx.author).posttitle()
+        post_body = await self.config.user(ctx.author).postbody()
+        ifttt_key = await self.config.guild(ctx.guild).iftttkey()
+        tumblr_key = await self.config.guild(ctx.guild).ifttttumblr()
+        ifttt = IftttWebhook(ifttt_key)
+        ifttt.trigger(tumblr_key, value1=post_title, value2=post_body, value3='none')
