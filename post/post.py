@@ -134,25 +134,25 @@ class Post(commands.Cog):
     async def config(self, ctx):
         """Social feed settings."""
 
-    @config.command(name="channel", pass_context=True) #nested-group command
+    @config.command(name="channel_api", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
-    async def channel(self, ctx, post_channel): 
+    async def channel_api(self, ctx, post_channel): 
         """Store which channel to post on Discord."""
         await self.config.guild(ctx.guild).discordchannel.set(post_channel)
         embed = discord.Embed(title = "Post Config Discord", description = "Discord Channel Set.", color = discord.Color.green())
         await ctx.send(embed=embed)
 
-    @config.command(name="app_key", pass_context=True) #nested-group command
+    @config.command(name="ifttt_api", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
-    async def app_key(self, ctx, ifttt_key): 
+    async def ifttt_api(self, ctx, ifttt_key): 
         """Store the IFTTT Facebook Configuragion KEY."""
         await self.config.guild(ctx.guild).iftttkey.set(ifttt_key)
         embed = discord.Embed(title = "Post Config IFTTT", description = "IFTTT Configuration Set.", color = discord.Color.green())
         await ctx.send(embed=embed)
 
-    @config.command(name="facebook_key", pass_context=True) #nested-group command
+    @config.command(name="facebook_api", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
-    async def facebook_key(self, ctx, facebook_key): 
+    async def facebook_api(self, ctx, facebook_key): 
         """Store the IFTTT Facebook Configuragion KEY."""
         await self.config.guild(ctx.guild).iftttfacebook.set(facebook_key)
         embed = discord.Embed(title = "Post Config Facebook", description = "Facebook Configuration Set.", color = discord.Color.green())
