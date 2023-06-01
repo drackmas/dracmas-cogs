@@ -100,14 +100,18 @@ class Post(commands.Cog):
             ifttt_key = await self.config.guild(ctx.guild).iftttkey()
             #tumblr key
             tumblr_key = await self.config.guild(ctx.guild).ifttttumblr()
+            #reddit key
+            reddit_key = await self.config.guild(ctx.guild).iftttreddit()
             #ifttt setup
             ifttt = IftttWebhook(ifttt_key)
             #post to facebook
             ifttt.trigger(facebook_key, value1=post_title, value2=post_body, value3='none')
             #post to tumblr
             ifttt.trigger(tumblr_key, value1=post_title, value2=post_body, value3='none')
+            #post to reddit
+            ifttt.trigger(reddit_key, value1=post_title, value2=post_body, value3='none')
             #notify that post is complete
-            embed = discord.Embed(title = "Post Submission:", description = "Webhook post sent.", color = discord.Color.green())
+            embed = discord.Embed(title = "Post Submission:", description = "Webhook posts sent.", color = discord.Color.green())
             await ctx.send(embed=embed)
         elif post_twitter == twitter_post_true:
             embed = discord.Embed(title = "Post Submission ERROR!", description = "Post twitterconfig currently enabled.\nPlease use [.post twitterconfig no] to disable twitter and submit post.", color = discord.Color.red())
@@ -172,6 +176,14 @@ class Post(commands.Cog):
         await self.config.guild(ctx.guild).ifttttumblr.set(tumblr_key)
         embed = discord.Embed(title = "Post Config Tumblr", description = "Tumblr Configuration Set.", color = discord.Color.green())
         await ctx.send(embed=embed)
+        
+    @config.command(name="reddit_api", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def reddit_api(self, ctx, reddit_key): 
+        """Store the IFTTT Reddit Configuragion KEY."""
+        await self.config.guild(ctx.guild).iftttreddit.set(reddit_key)
+        embed = discord.Embed(title = "Post Config Reddit", description = "Reddit Configuration Set.", color = discord.Color.green())
+        await ctx.send(embed=embed)
 
     @post.group(name="test", pass_context=True) #nested-group
     @commands.has_role("Bot-Dev")
@@ -215,4 +227,17 @@ class Post(commands.Cog):
         ifttt = IftttWebhook(ifttt_key)
         ifttt.trigger(tumblr_key, value1=post_title, value2=post_body, value3='none')
         embed = discord.Embed(title = "Post Test Tumblr", description = "Test post sent.", color = discord.Color.green())
+        await ctx.send(embed=embed)
+        
+    @test.command(name="reddit", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def reddit(self, ctx): 
+        """Post to Reddit."""
+        post_title = await self.config.user(ctx.author).posttitle()
+        post_body = await self.config.user(ctx.author).postbody()
+        ifttt_key = await self.config.guild(ctx.guild).iftttkey()
+        reddit_key = await self.config.guild(ctx.guild).iftttreddit()
+        ifttt = IftttWebhook(ifttt_key)
+        ifttt.trigger(reddit_key, value1=post_title, value2=post_body, value3='none')
+        embed = discord.Embed(title = "Post Test Reddit", description = "Test post sent.", color = discord.Color.green())
         await ctx.send(embed=embed)
