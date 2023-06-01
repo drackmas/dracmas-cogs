@@ -94,11 +94,18 @@ class Post(commands.Cog):
             post_body = await self.config.user(ctx.author).postbody()
             embed = discord.Embed(title = post_title, description = post_body, color = discord.Color.blue())
             await channel.send(embed=embed)
-            #post to facebook
+            #facebook key
             facebook_key = await self.config.guild(ctx.guild).iftttfacebook()
+            #ifttt key
             ifttt_key = await self.config.guild(ctx.guild).iftttkey()
+            #tumblr key
+            tumblr_key = await self.config.guild(ctx.guild).ifttttumblr()
+            #ifttt setup
             ifttt = IftttWebhook(ifttt_key)
+            #post to facebook
             ifttt.trigger(facebook_key, value1=post_title, value2=post_body, value3='none')
+            #post to tumblr
+            ifttt.trigger(tumblr_key, value1=post_title, value2=post_body, value3='none')
             #notify that post is complete
             embed = discord.Embed(title = "Post Submission:", description = "Webhook post sent.", color = discord.Color.green())
             await ctx.send(embed=embed)
@@ -181,6 +188,8 @@ class Post(commands.Cog):
         post_body = await self.config.user(ctx.author).postbody()
         embed = discord.Embed(title = post_title, description = post_body, color = discord.Color.blue())
         await channel.send(embed=embed)
+        embed = discord.Embed(title = "Post Test Discord", description = "Test post sent.", color = discord.Color.green())
+        await ctx.send(embed=embed)
 
     @test.command(name="facebook", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
@@ -192,6 +201,8 @@ class Post(commands.Cog):
         facebook_key = await self.config.guild(ctx.guild).iftttfacebook()
         ifttt = IftttWebhook(ifttt_key)
         ifttt.trigger(facebook_key, value1=post_title, value2=post_body, value3='none')
+        embed = discord.Embed(title = "Post Test Facebook", description = "Test post sent.", color = discord.Color.green())
+        await ctx.send(embed=embed)
         
     @test.command(name="tumblr", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
@@ -203,3 +214,5 @@ class Post(commands.Cog):
         tumblr_key = await self.config.guild(ctx.guild).ifttttumblr()
         ifttt = IftttWebhook(ifttt_key)
         ifttt.trigger(tumblr_key, value1=post_title, value2=post_body, value3='none')
+        embed = discord.Embed(title = "Post Test Tumblr", description = "Test post sent.", color = discord.Color.green())
+        await ctx.send(embed=embed)
