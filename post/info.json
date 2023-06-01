@@ -1,0 +1,23 @@
+
+{
+    "name": "Post",
+    "short": "Send Status message.",
+    "description": "This is a social cog that sends out status messages on social media.",
+    "end_user_data_statement": "This cog does not persistently store any data or metadata about users.",
+    "install_msg": "Thank you for installing",
+    "author": [
+        "Dracmas Lovegood"
+    ],
+    "required_cogs": {},
+    "requirements": [
+        "git+https://github.com/DrGFreeman/IFTTT-Webhook.git"
+    ],
+    "tags": [
+        "utility",
+        "fun"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
