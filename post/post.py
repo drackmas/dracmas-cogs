@@ -144,7 +144,7 @@ class Post(commands.Cog):
 
     @config.command(name="ifttt", pass_context=True) #nested-group command
     @commands.has_role("Bot-Dev")
-    async def facebook(self, ctx, ifttt_key): 
+    async def ifttt(self, ctx, ifttt_key): 
         """Store the IFTTT Facebook Configuragion KEY."""
         await self.config.guild(ctx.guild).iftttkey.set(ifttt_key)
         embed = discord.Embed(title = "Post Config Facebook", description = "Facebook Configuration Set.", color = discord.Color.green())
