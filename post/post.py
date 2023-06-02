@@ -185,6 +185,14 @@ class Post(commands.Cog):
         embed = discord.Embed(title = "Post Config Reddit", description = "Reddit Configuration Set.", color = discord.Color.green())
         await ctx.send(embed=embed)
 
+    @config.command(name="blogger_api", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def blogger_api(self, ctx, blogger_key): 
+        """Store the IFTTT Blogger Configuragion KEY."""
+        await self.config.guild(ctx.guild).iftttblogger.set(blogger_key)
+        embed = discord.Embed(title = "Post Config Blogger", description = "Blogger Configuration Set.", color = discord.Color.green())
+        await ctx.send(embed=embed)
+
     @post.group(name="test", pass_context=True) #nested-group
     @commands.has_role("Bot-Dev")
     async def test(self, ctx):
@@ -241,3 +249,16 @@ class Post(commands.Cog):
         ifttt.trigger(reddit_key, value1=post_title, value2=post_body, value3='none')
         embed = discord.Embed(title = "Post Test Reddit", description = "Test post sent.", color = discord.Color.green())
         await ctx.send(embed=embed)
+        
+    @test.command(name="blogger", pass_context=True) #nested-group command
+    @commands.has_role("Bot-Dev")
+    async def blogger(self, ctx): 
+        """Post to Blogger."""
+        post_title = await self.config.user(ctx.author).posttitle()
+        post_body = await self.config.user(ctx.author).postbody()
+        ifttt_key = await self.config.guild(ctx.guild).iftttkey()
+        blogger_key = await self.config.guild(ctx.guild).iftttblogger()
+        ifttt = IftttWebhook(ifttt_key)
+        ifttt.trigger(blogger_key, value1=post_title, value2=post_body, value3='none')
+        embed = discord.Embed(title = "Post Test Blogger", description = "Test post sent.", color = discord.Color.green())
+        await ctx.send(embed=embed)      
