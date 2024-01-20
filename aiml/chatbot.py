@@ -1,7 +1,7 @@
 import aiml
 from redbot.core import commands
 
-class chatbot(commands.Cog):
+class Chatbot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.aiml_kernel = aiml.Kernel()
