@@ -1,0 +1,25 @@
+{
+    "name": "AIML",
+    "description": "A cog for Red Discord Bot that provides AIML (Artificial Intelligence Markup Language) functionality.",
+    "author": "Dracmas",
+    "version": "1.0.0",
+    "min_bot_version": "3.0.0",
+    "dependencies": [
+        "redbot.core"
+    ],
+    "commands": [
+        {
+            "name": "aiml",
+            "description": "Interact with AIML chatbot.",
+            "usage": "!aiml <message>",
+            "examples": [
+                "!aiml Hello",
+                "!aiml How are you?"
+            ]
+        }
+    ],
+    "permissions": [],
+    "required_cogs": [],
+    "requirements": ["python-aiml"],
+    "tags": []
+}
