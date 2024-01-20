@@ -1,7 +1,7 @@
 import aiml
 from redbot.core import commands
 
-class ChatBotCog(commands.Cog):
+class chatbot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.aiml_kernel = aiml.Kernel()
@@ -15,4 +15,4 @@ class ChatBotCog(commands.Cog):
             await message.channel.send(response)
 
 def setup(bot):
-    bot.add_cog(ChatBotCog(bot))
+    bot.add_cog(chatbot(bot))
