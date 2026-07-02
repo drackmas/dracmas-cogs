@@ -9,7 +9,7 @@ class Llm(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Default endpoint configuration pointing to the ApiBridge channel
-        self.api_url = "http://0.0.0.0:8000/v1/chat/completions"
+        self.api_url = "http://192.168.8.124:8000/v1/chat/completions"
         self.model_name = "openlumara" # Or whichever model ID you want to pass
 
     @commands.Cog.listener()
