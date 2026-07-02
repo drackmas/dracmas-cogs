@@ -176,8 +176,6 @@ class Llm(commands.Cog):
                 headers = {"Content-Type": "application/json"}
                 
                 # Optimized connection timeout parameters
-                # total=None ensures heavy inference generations won't be killed mid-way
-                # sock_read=30 handles disconnection detection if the server dies
                 timeout_settings = aiohttp.ClientTimeout(total=None, sock_read=30, connect=10)
 
                 async with aiohttp.ClientSession(timeout=timeout_settings) as session:
@@ -202,7 +200,8 @@ class Llm(commands.Cog):
                             if response.status == 200:
                                 
                                 async def sse_stream_generator():
-                                    async for line in response.content:
+                                    async_content = response.content
+                                    async for line in async_content:
                                         decoded_line = line.decode('utf-8').strip()
                                         if not decoded_line:
                                             continue
@@ -218,12 +217,14 @@ class Llm(commands.Cog):
                                                     continue
                                                     
                                                 choice = choices[0]
+                                                delta = choice.get("delta", {})
                                                 
-                                                # Check for chunk breaks first before extracting text deltas
+                                                # Check for chunk splits first, then continue to avoid misreading as a text delta
                                                 if choice.get("finish_reason") == "new_chunk":
                                                     yield {"type": "new_chunk"}
+                                                    continue
                                                     
-                                                delta = choice.get("delta", {})
+                                                # Fallback safely to parsing standard token content text strings
                                                 if "content" in delta and delta["content"]:
                                                     yield {"type": "content", "content": delta["content"]}
                                                     
