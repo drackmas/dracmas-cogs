@@ -8,7 +8,7 @@ MAX_CHARS = 1900
 
 
 class Llm(commands.Cog):
-    """Stable streaming LLM cog with tool-safe SSE handling."""
+    """Stream responses from OpenLumara with proper command passthrough."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -24,30 +24,30 @@ class Llm(commands.Cog):
         }
 
     # =========================================================
-    # STREAM TO DISCORD (INSPIRED BY YOUR discord.py REFERENCE)
+    # STREAM TO DISCORD
     # =========================================================
 
-    async def _stream_to_discord(self, token_stream, channel, trigger_message=None):
+    async def _stream_to_discord(self, stream, channel, trigger_message=None):
         use_replies = self.config.get("use_replies", False)
         edit_interval = self.config.get("edit_interval", 1.0)
 
-        if use_replies and trigger_message:
-            msg = await trigger_message.reply("...", mention_author=False)
-        else:
-            msg = await channel.send("...")
+        msg = (
+            await trigger_message.reply("...", mention_author=False)
+            if use_replies and trigger_message
+            else await channel.send("...")
+        )
 
-        class StreamState:
+        class State:
             def __init__(self, message):
-                self.message = message
+                self.msg = message
                 self.buffer = ""
                 self.full = ""
                 self.running = True
-                self.last_edit = asyncio.get_event_loop().time()
 
-        state = StreamState(msg)
+        state = State(msg)
         lock = asyncio.Lock()
 
-        async def editor_loop():
+        async def editor():
             while state.running:
                 await asyncio.sleep(edit_interval)
 
@@ -59,54 +59,43 @@ class Llm(commands.Cog):
                     state.buffer = ""
 
                     try:
-                        await state.message.edit(content=state.full)
-                        state.last_edit = asyncio.get_event_loop().time()
+                        await state.msg.edit(content=state.full)
                     except discord.HTTPException:
-                        # fallback: start new message
-                        state.message = await channel.send(state.full)
+                        state.msg = await channel.send(state.full)
 
-        editor_task = asyncio.create_task(editor_loop())
+        editor_task = asyncio.create_task(editor())
 
         try:
-            async for token in token_stream:
+            async for token in stream:
 
-                # ----------------------------
-                # NORMAL TEXT
-                # ----------------------------
+                # TEXT
                 if token.get("type") in (None, "content"):
                     content = token.get("content")
                     if isinstance(content, str):
                         async with lock:
                             state.buffer += content
 
-                # ----------------------------
-                # TOOL CALLS (DO NOT BREAK STREAM)
-                # ----------------------------
+                # TOOL CALLS (do not break stream)
                 elif token.get("type") == "tool_calls":
-                    # Optional: show lightweight trace
                     async with lock:
-                        state.buffer += "\n[Tool call executed]\n"
+                        state.buffer += "\n[tool call]\n"
 
-                # ----------------------------
-                # UNKNOWN EVENT SAFETY
-                # ----------------------------
+                # UNKNOWN
                 else:
                     continue
 
-                # ----------------------------
-                # DISCORD LIMIT PROTECTION
-                # ----------------------------
+                # Discord overflow protection
                 async with lock:
                     if len(state.full) + len(state.buffer) >= MAX_CHARS:
                         state.full += state.buffer
                         state.buffer = ""
 
                         try:
-                            await state.message.edit(content=state.full)
+                            await state.msg.edit(content=state.full)
                         except discord.HTTPException:
                             pass
 
-                        state.message = await channel.send("...")
+                        state.msg = await channel.send("...")
                         state.full = ""
 
         finally:
@@ -122,19 +111,15 @@ class Llm(commands.Cog):
                     state.full += state.buffer
 
                 try:
-                    await state.message.edit(content=state.full)
+                    await state.msg.edit(content=state.full)
                 except discord.HTTPException:
                     await channel.send(state.full)
 
     # =========================================================
-    # SSE STREAM PARSER (FIXES TOOL-CALL HANGING ISSUE)
+    # SSE STREAM PARSER (tool-safe)
     # =========================================================
 
     async def _sse_stream(self, response):
-        """
-        Robust SSE parser that NEVER stalls on tool calls or partial JSON.
-        """
-
         buffer = ""
 
         async for line in response.content:
@@ -156,20 +141,17 @@ class Llm(commands.Cog):
 
                 delta = obj["choices"][0].get("delta", {})
 
-                # text
                 if delta.get("content"):
                     yield {"type": "content", "content": delta["content"]}
 
-                # tool calls
                 if delta.get("tool_calls"):
                     yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
 
             except json.JSONDecodeError:
-                # wait for more chunks (CRITICAL FOR TOOL CALLS)
                 continue
 
     # =========================================================
-    # DISCORD EVENT
+    # MESSAGE HANDLER
     # =========================================================
 
     @commands.Cog.listener()
@@ -181,23 +163,54 @@ class Llm(commands.Cog):
             if not self.bot.user.mentioned_in(message):
                 return
 
+        # ----------------------------
+        # RAW CONTENT (DO NOT STRIP COMMAND MEANING)
+        # ----------------------------
         content = message.content.strip()
 
-        for m in message.raw_mentions:
-            content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
-
-        content = content.strip()
         if not content:
             return
 
-        if self.config.get("enable_group_chat"):
-            content = f"{message.author.name}: {content}"
+        # ----------------------------
+        # COMMAND EXTRACTION (RESTORED FROM ORIGINAL SYSTEM)
+        # ----------------------------
+        cmd_prefix = "/"
+        cmd = None
+        args = None
+        is_cmd = False
 
+        try:
+            cmd_prefix, cmd, args = await self.ai_channel.commands._extract_cmd(content)
+
+            if cmd:
+                is_cmd = content.lower().strip().startswith(cmd_prefix.lower())
+
+        except Exception:
+            # if extraction fails, fallback to normal text
+            pass
+
+        # ----------------------------
+        # PRESERVE COMMAND FORMAT FOR OPENLUMARA
+        # ----------------------------
+        if is_cmd:
+            prompt = f"{cmd_prefix}{' '.join(cmd)}"
+        else:
+            prompt = content
+
+        # ----------------------------
+        # GROUP CHAT CONTEXT (optional)
+        # ----------------------------
+        if self.config.get("enable_group_chat") and not is_cmd:
+            prompt = f"{message.author.name}: {prompt}"
+
+        # ----------------------------
+        # SEND TO OPENLUMARA
+        # ----------------------------
         async with message.channel.typing():
 
             payload = {
                 "model": self.model_name,
-                "messages": [{"role": "user", "content": content}],
+                "messages": [{"role": "user", "content": prompt}],
                 "stream": True
             }
 
@@ -207,8 +220,7 @@ class Llm(commands.Cog):
                 async with session.post(self.api_url, json=payload) as resp:
 
                     if resp.status != 200:
-                        err = await resp.text()
-                        await message.reply(f"API error: {err}")
+                        await message.reply(await resp.text())
                         return
 
                     stream = self._sse_stream(resp)
