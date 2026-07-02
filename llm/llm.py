@@ -8,7 +8,7 @@ MAX_CHARS = 1900
 
 
 class Llm(commands.Cog):
-    """Stream responses from OpenLumara (or any OpenAI-compatible API)."""
+    """Stable streaming LLM cog with tool-safe SSE handling."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -23,94 +23,166 @@ class Llm(commands.Cog):
             "enable_group_chat": True
         }
 
-    # ----------------------------
-    # STREAM HANDLER
-    # ----------------------------
+    # =========================================================
+    # STREAM TO DISCORD (INSPIRED BY YOUR discord.py REFERENCE)
+    # =========================================================
 
-    async def _stream_to_discord(self, stream, channel, trigger_message=None):
-        """
-        Handles streaming tokens and safely paginates into Discord messages.
-        """
-
+    async def _stream_to_discord(self, token_stream, channel, trigger_message=None):
         use_replies = self.config.get("use_replies", False)
         edit_interval = self.config.get("edit_interval", 1.0)
 
-        # create initial message
         if use_replies and trigger_message:
             msg = await trigger_message.reply("...", mention_author=False)
         else:
             msg = await channel.send("...")
 
-        buffer = ""
-        displayed = ""
-        last_edit = asyncio.get_event_loop().time()
+        class StreamState:
+            def __init__(self, message):
+                self.message = message
+                self.buffer = ""
+                self.full = ""
+                self.running = True
+                self.last_edit = asyncio.get_event_loop().time()
 
-        async def safe_edit(force=False):
-            nonlocal last_edit, displayed, buffer, msg
+        state = StreamState(msg)
+        lock = asyncio.Lock()
 
-            now = asyncio.get_event_loop().time()
+        async def editor_loop():
+            while state.running:
+                await asyncio.sleep(edit_interval)
 
-            if not force and (now - last_edit) < edit_interval:
-                return
+                async with lock:
+                    if not state.buffer:
+                        continue
 
-            if not buffer:
-                return
+                    state.full += state.buffer
+                    state.buffer = ""
 
-            displayed += buffer
-            buffer = ""
+                    try:
+                        await state.message.edit(content=state.full)
+                        state.last_edit = asyncio.get_event_loop().time()
+                    except discord.HTTPException:
+                        # fallback: start new message
+                        state.message = await channel.send(state.full)
 
-            try:
-                await msg.edit(content=displayed)
-                last_edit = now
-            except discord.HTTPException:
-                # If edit fails (rare), fall back to new message
-                msg = await channel.send(displayed)
-
-        async for token in stream:
-            content = token.get("content")
-            if not content:
-                continue
-
-            # append token
-            buffer += content
-
-            # overflow protection (DISCORD LIMIT)
-            if len(displayed) + len(buffer) >= MAX_CHARS:
-                await safe_edit(force=True)
-
-                # start new message
-                msg = await channel.send("...")
-                displayed = ""
-                buffer = ""
-
-            # periodic edit
-            await safe_edit(force=False)
-
-        # final flush
-        if buffer:
-            displayed += buffer
+        editor_task = asyncio.create_task(editor_loop())
 
         try:
-            await msg.edit(content=displayed)
-        except discord.HTTPException:
-            await channel.send(displayed)
+            async for token in token_stream:
 
-    # ----------------------------
-    # MESSAGE LISTENER
-    # ----------------------------
+                # ----------------------------
+                # NORMAL TEXT
+                # ----------------------------
+                if token.get("type") in (None, "content"):
+                    content = token.get("content")
+                    if isinstance(content, str):
+                        async with lock:
+                            state.buffer += content
+
+                # ----------------------------
+                # TOOL CALLS (DO NOT BREAK STREAM)
+                # ----------------------------
+                elif token.get("type") == "tool_calls":
+                    # Optional: show lightweight trace
+                    async with lock:
+                        state.buffer += "\n[Tool call executed]\n"
+
+                # ----------------------------
+                # UNKNOWN EVENT SAFETY
+                # ----------------------------
+                else:
+                    continue
+
+                # ----------------------------
+                # DISCORD LIMIT PROTECTION
+                # ----------------------------
+                async with lock:
+                    if len(state.full) + len(state.buffer) >= MAX_CHARS:
+                        state.full += state.buffer
+                        state.buffer = ""
+
+                        try:
+                            await state.message.edit(content=state.full)
+                        except discord.HTTPException:
+                            pass
+
+                        state.message = await channel.send("...")
+                        state.full = ""
+
+        finally:
+            state.running = False
+            editor_task.cancel()
+            try:
+                await editor_task
+            except asyncio.CancelledError:
+                pass
+
+            async with lock:
+                if state.buffer:
+                    state.full += state.buffer
+
+                try:
+                    await state.message.edit(content=state.full)
+                except discord.HTTPException:
+                    await channel.send(state.full)
+
+    # =========================================================
+    # SSE STREAM PARSER (FIXES TOOL-CALL HANGING ISSUE)
+    # =========================================================
+
+    async def _sse_stream(self, response):
+        """
+        Robust SSE parser that NEVER stalls on tool calls or partial JSON.
+        """
+
+        buffer = ""
+
+        async for line in response.content:
+            line = line.decode("utf-8", errors="ignore").strip()
+
+            if not line.startswith("data:"):
+                continue
+
+            data = line[5:].strip()
+
+            if data == "[DONE]":
+                break
+
+            buffer += data
+
+            try:
+                obj = json.loads(buffer)
+                buffer = ""
+
+                delta = obj["choices"][0].get("delta", {})
+
+                # text
+                if delta.get("content"):
+                    yield {"type": "content", "content": delta["content"]}
+
+                # tool calls
+                if delta.get("tool_calls"):
+                    yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
+
+            except json.JSONDecodeError:
+                # wait for more chunks (CRITICAL FOR TOOL CALLS)
+                continue
+
+    # =========================================================
+    # DISCORD EVENT
+    # =========================================================
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
 
-        mentioned = self.bot.user.mentioned_in(message)
-        if self.config.get("require_mentions") and not mentioned:
-            return
+        if self.config.get("require_mentions"):
+            if not self.bot.user.mentioned_in(message):
+                return
 
-        content = message.content
+        content = message.content.strip()
 
-        # strip mentions
         for m in message.raw_mentions:
             content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
 
@@ -118,16 +190,14 @@ class Llm(commands.Cog):
         if not content:
             return
 
-        # build payload context
-        payload_text = content
-
         if self.config.get("enable_group_chat"):
-            payload_text = f"{message.author.name}: {content}"
+            content = f"{message.author.name}: {content}"
 
         async with message.channel.typing():
+
             payload = {
                 "model": self.model_name,
-                "messages": [{"role": "user", "content": payload_text}],
+                "messages": [{"role": "user", "content": content}],
                 "stream": True
             }
 
@@ -135,31 +205,16 @@ class Llm(commands.Cog):
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(self.api_url, json=payload) as resp:
+
                     if resp.status != 200:
                         err = await resp.text()
                         await message.reply(f"API error: {err}")
                         return
 
-                    async def stream():
-                        async for line in resp.content:
-                            line = line.decode("utf-8").strip()
-                            if not line.startswith("data:"):
-                                continue
-
-                            data = line[5:].strip()
-                            if data == "[DONE]":
-                                break
-
-                            try:
-                                obj = json.loads(data)
-                                delta = obj["choices"][0].get("delta", {})
-                                if "content" in delta:
-                                    yield {"content": delta["content"]}
-                            except Exception:
-                                continue
+                    stream = self._sse_stream(resp)
 
                     await self._stream_to_discord(
-                        stream(),
+                        stream,
                         message.channel,
                         trigger_message=message
                     )
