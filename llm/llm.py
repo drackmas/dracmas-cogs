@@ -23,7 +23,7 @@ class Llm(commands.Cog):
             "enable_group_chat": True
         }
 
-    async def _stream_to_discord(self, response_stream, discord_channel, use_replies=False, trigger_message=None):
+async def _stream_to_discord(self, response_stream, discord_channel, use_replies=False, trigger_message=None):
         """Streams or extracts chunks from an incoming stream to Discord in steps."""
         edit_interval = self.config.get("edit_interval", 1.0)
         
@@ -61,7 +61,23 @@ class Llm(commands.Cog):
         try:
             async with discord_channel.typing():
                 async for token in response_stream:
+                    # Initialize target flag for splitting
+                    trigger_new_chunk = False
+                    
                     if token.get("type") == "new_chunk":
+                        trigger_new_chunk = True
+                    else:
+                        word = token.get("content")
+                        if not word or not isinstance(word, str):
+                            continue
+                        
+                        # Check if adding this word will push us past the limit
+                        async with edit_lock:
+                            current_len = len(state.full_content) + len(state.pending_content)
+                            if current_len + len(word) > MAX_CHARS:
+                                trigger_new_chunk = True
+
+                    if trigger_new_chunk:
                         # 1. Flush existing contents safely down to the current message box
                         async with edit_lock:
                             if state.pending_content:
@@ -75,17 +91,16 @@ class Llm(commands.Cog):
                         # 2. Create the new message container outside the lock to avoid deadlocks
                         new_msg = await discord_channel.send("...")
                         
-                        # 3. Swap state references inside the lock so the background editor 
-                        # immediately begins pumping upcoming text tokens into the new container
+                        # 3. Swap state references inside the lock
                         async with edit_lock:
                             state.message_obj = new_msg
                             state.full_content = ""
-                        continue
-
-                    word = token.get("content")
-                    if not word or not isinstance(word, str):
-                        continue
                         
+                        # If this was an API driven chunk swap, skip processing content strings
+                        if token.get("type") == "new_chunk":
+                            continue
+
+                    # Append the incoming token text to pending buffer
                     async with edit_lock:
                         state.pending_content += word
         finally:
