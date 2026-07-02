@@ -1,19 +1,15 @@
 import discord
-import aiohttp
 import asyncio
-import json
 from redbot.core import commands
 
 MAX_CHARS = 1900
 
 
 class Llm(commands.Cog):
-    """Stream responses from OpenLumara with proper command passthrough."""
+    """Stream responses through OpenLumara core channel system (correct command routing)."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.api_url = "http://192.168.8.124:8000/v1/chat/completions"
-        self.model_name = "openlumara"
 
         self.config = {
             "require_mentions": True,
@@ -63,28 +59,16 @@ class Llm(commands.Cog):
                     except discord.HTTPException:
                         state.msg = await channel.send(state.full)
 
-        editor_task = asyncio.create_task(editor())
+        task = asyncio.create_task(editor())
 
         try:
             async for token in stream:
-
-                # TEXT
-                if token.get("type") in (None, "content"):
-                    content = token.get("content")
-                    if isinstance(content, str):
-                        async with lock:
-                            state.buffer += content
-
-                # TOOL CALLS (do not break stream)
-                elif token.get("type") == "tool_calls":
+                content = token.get("content")
+                if isinstance(content, str):
                     async with lock:
-                        state.buffer += "\n[tool call]\n"
+                        state.buffer += content
 
-                # UNKNOWN
-                else:
-                    continue
-
-                # Discord overflow protection
+                # overflow protection
                 async with lock:
                     if len(state.full) + len(state.buffer) >= MAX_CHARS:
                         state.full += state.buffer
@@ -92,7 +76,7 @@ class Llm(commands.Cog):
 
                         try:
                             await state.msg.edit(content=state.full)
-                        except discord.HTTPException:
+                        except:
                             pass
 
                         state.msg = await channel.send("...")
@@ -100,9 +84,9 @@ class Llm(commands.Cog):
 
         finally:
             state.running = False
-            editor_task.cancel()
+            task.cancel()
             try:
-                await editor_task
+                await task
             except asyncio.CancelledError:
                 pass
 
@@ -112,43 +96,8 @@ class Llm(commands.Cog):
 
                 try:
                     await state.msg.edit(content=state.full)
-                except discord.HTTPException:
+                except:
                     await channel.send(state.full)
-
-    # =========================================================
-    # SSE STREAM PARSER (tool-safe)
-    # =========================================================
-
-    async def _sse_stream(self, response):
-        buffer = ""
-
-        async for line in response.content:
-            line = line.decode("utf-8", errors="ignore").strip()
-
-            if not line.startswith("data:"):
-                continue
-
-            data = line[5:].strip()
-
-            if data == "[DONE]":
-                break
-
-            buffer += data
-
-            try:
-                obj = json.loads(buffer)
-                buffer = ""
-
-                delta = obj["choices"][0].get("delta", {})
-
-                if delta.get("content"):
-                    yield {"type": "content", "content": delta["content"]}
-
-                if delta.get("tool_calls"):
-                    yield {"type": "tool_calls", "tool_calls": delta["tool_calls"]}
-
-            except json.JSONDecodeError:
-                continue
 
     # =========================================================
     # MESSAGE HANDLER
@@ -159,74 +108,57 @@ class Llm(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
+        # Require mention unless disabled
         if self.config.get("require_mentions"):
             if not self.bot.user.mentioned_in(message):
                 return
 
-        # ----------------------------
-        # RAW CONTENT (DO NOT STRIP COMMAND MEANING)
-        # ----------------------------
         content = message.content.strip()
-
         if not content:
             return
 
-        # ----------------------------
-        # COMMAND EXTRACTION (RESTORED FROM ORIGINAL SYSTEM)
-        # ----------------------------
-        cmd_prefix = "/"
-        cmd = None
-        args = None
-        is_cmd = False
+        # remove bot mention text only (DO NOT modify command semantics)
+        for m in message.raw_mentions:
+            content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
 
-        try:
-            cmd_prefix, cmd, args = await self.ai_channel.commands._extract_cmd(content)
+        content = content.strip()
+        if not content:
+            return
 
-            if cmd:
-                is_cmd = content.lower().strip().startswith(cmd_prefix.lower())
+        # =====================================================
+        # ADMIN CHECK (REPLACES authorized_user_id)
+        # =====================================================
+        commands_authorized = message.author.guild_permissions.administrator
 
-        except Exception:
-            # if extraction fails, fallback to normal text
-            pass
+        # =====================================================
+        # GROUP CHAT CONTEXT
+        # =====================================================
+        if self.config.get("enable_group_chat"):
+            content = f"{message.author.display_name}: {content}"
 
-        # ----------------------------
-        # PRESERVE COMMAND FORMAT FOR OPENLUMARA
-        # ----------------------------
-        if is_cmd:
-            prompt = f"{cmd_prefix}{' '.join(cmd)}"
-        else:
-            prompt = content
-
-        # ----------------------------
-        # GROUP CHAT CONTEXT (optional)
-        # ----------------------------
-        if self.config.get("enable_group_chat") and not is_cmd:
-            prompt = f"{message.author.name}: {prompt}"
-
-        # ----------------------------
-        # SEND TO OPENLUMARA
-        # ----------------------------
         async with message.channel.typing():
+            try:
+                # =================================================
+                # CRITICAL FIX:
+                # DO NOT call OpenLumara directly anymore
+                # MUST go through ai_channel to preserve commands
+                # =================================================
 
-            payload = {
-                "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": True
-            }
+                stream = self.ai_channel.send_stream(
+                    {"role": "user", "content": content},
+                    commands_authorized=commands_authorized
+                )
 
-            timeout = aiohttp.ClientTimeout(total=None, sock_read=60)
+                formatted_stream = self.ai_channel.format_stream_for_text(
+                    stream,
+                    chunk_size=MAX_CHARS
+                )
 
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(self.api_url, json=payload) as resp:
+                await self._stream_to_discord(
+                    formatted_stream,
+                    message.channel,
+                    trigger_message=message
+                )
 
-                    if resp.status != 200:
-                        await message.reply(await resp.text())
-                        return
-
-                    stream = self._sse_stream(resp)
-
-                    await self._stream_to_discord(
-                        stream,
-                        message.channel,
-                        trigger_message=message
-                    )
+            except Exception as e:
+                await message.channel.send(f"Error: {e}")
