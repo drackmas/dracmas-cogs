@@ -1,241 +1,238 @@
-import discord
-import aiohttp
 import asyncio
-import json
-from redbot.core import commands
+import logging
+from typing import Optional
+
+import discord
+import core
+from redbot.core import commands, Config
 
 MAX_CHARS = 1900
 
+# Set up logging matching Red's standards
+log = logging.getLogger("red.openlumara.llm")
 
 class Llm(commands.Cog):
+    """Talk to your AI over Discord via OpenLumara."""
 
-    def __init__(self, bot):
+    def __init__(self, bot, ai_channel):
         self.bot = bot
-
-        self.api_url = "http://192.168.8.124:8000/v1/chat/completions"
-        self.model_name = "openlumara"
-
-        self.config = {
+        self.ai_channel = ai_channel
+        
+        # Red Configuration Initialization
+        self.config = Config.get_conf(self, identifier=9876543210, force_registration=True)
+        
+        default_global = {
             "require_mentions": True,
-            "enable_group_chat": True
+            "use_message_streaming": False,
+            "edit_interval": 1,
+            "show_reasoning": False,
+            "stream_tool_calls": False,
+            "use_replies": False,
+            "enable_group_chat": True,
+            "startup_message": None,
+            "shutdown_message": None,
         }
+        self.config.register_global(**default_global)
 
-        self.sessions = {}  # channel_id -> messages
+    async def cog_load(self):
+        """Native Red Cog lifecycle hook for initialization."""
+        log.info("OpenLumara AI Cog logged in.")
+        startup_message = await self.config.startup_message()
+        if startup_message:
+            await self.ai_channel.push(startup_message)
 
-    # =====================================================
-    # UTIL: SAFE CHUNKING
-    # =====================================================
+    async def cog_unload(self):
+        """Native Red Cog lifecycle hook for cleanup/shutdown."""
+        shutdown_message = await self.config.shutdown_message()
+        if shutdown_message:
+            await self.ai_channel.push(shutdown_message)
 
-    def chunk_text(self, text: str):
-        return [text[i:i + MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
+    async def _stream_to_discord(self, token_stream, discord_channel):
+        """Streams a message to discord in steps."""
+        edit_interval = await self.config.edit_interval()
+        message_obj = await discord_channel.send("processing your request...")
+        edit_lock = asyncio.Lock()
 
-    async def safe_send(self, channel, text: str):
-        for chunk in self.chunk_text(text):
-            await channel.send(chunk)
+        class StreamState:
+            def __init__(self, initial_msg):
+                self.message_obj = initial_msg
+                self.full_content = ""
+                self.pending_content = ""
+                self.is_running = True
 
-    async def safe_edit_or_send(self, msg, channel, text: str):
-        chunks = self.chunk_text(text)
+        state = StreamState(message_obj)
+
+        async def periodic_editor():
+            while state.is_running:
+                await asyncio.sleep(edit_interval)
+                async with edit_lock:
+                    if state.pending_content:
+                        try:
+                            chunk = state.pending_content
+                            state.pending_content = ""
+                            state.full_content += chunk
+                            await state.message_obj.edit(content=state.full_content)
+                        except Exception:
+                            pass
+
+        editor_task = asyncio.create_task(periodic_editor())
 
         try:
-            await msg.edit(content=chunks[0])
-        except discord.HTTPException:
-            await channel.send(chunks[0])
+            async with message_obj.channel.typing():
+                async for token in token_stream:
+                    if token.get("type") == "new_chunk":
+                        async with edit_lock:
+                            if state.pending_content:
+                                state.full_content += state.pending_content
+                                state.pending_content = ""
+                                try:
+                                    await state.message_obj.edit(content=state.full_content)
+                                    self.ai_channel.log(self.ai_channel.name, state.full_content)
+                                except:
+                                    pass
+                            
+                            state.message_obj = await discord_channel.send("...")
+                            state.full_content = ""
+                        continue
 
-        for chunk in chunks[1:]:
-            await channel.send(chunk)
-
-    # =====================================================
-    # COMMAND HANDLER
-    # =====================================================
-
-    def handle_command(self, channel_id, content):
-        lower = content.strip().lower()
-
-        if lower.startswith("/reset"):
-            return "reset", None
-
-        if lower.startswith("/new"):
-            return "new", None
-
-        if lower.startswith("/compress"):
-            return "compress", None
-
-        return None, content
-
-    # =====================================================
-    # SSE STREAM PARSER
-    # =====================================================
-
-    async def _sse_stream(self, response):
-        async for line in response.content:
-            line = line.decode("utf-8", errors="ignore").strip()
-
-            if not line.startswith("data:"):
-                continue
-
-            data = line[5:].strip()
-
-            if data == "[DONE]":
-                break
-
+                    word = token.get("content")
+                    if not word or not isinstance(word, str):
+                        continue
+                    state.pending_content += word
+        finally:
+            state.is_running = False
+            editor_task.cancel()
             try:
-                obj = json.loads(data)
-                delta = obj["choices"][0].get("delta", {})
-
-                # tool-call safety
-                if "tool_calls" in delta:
-                    yield {"content": json.dumps(delta["tool_calls"], indent=2)}
-                    continue
-
-                if "content" in delta:
-                    yield {"content": delta["content"]}
-
-            except:
-                continue
-
-    # =====================================================
-    # STREAM OUTPUT (FIXED)
-    # =====================================================
-
-    async def _stream_to_discord(self, stream, channel):
-        msg = await channel.send("...")
-
-        buffer = ""
-        full = ""
-
-        async for token in stream:
-            text = token.get("content")
-            if not isinstance(text, str):
-                continue
-
-            buffer += text
-
-            if len(full) + len(buffer) >= MAX_CHARS:
-                full += buffer
-                buffer = ""
-
-                await self.safe_edit_or_send(msg, channel, full)
-
-                msg = await channel.send("...")
-                full = ""
-
-        full += buffer
-
-        await self.safe_edit_or_send(msg, channel, full)
-
-    # =====================================================
-    # MAIN HANDLER
-    # =====================================================
+                await editor_task
+            except asyncio.CancelledError:
+                pass
+            
+            async with edit_lock:
+                if state.pending_content:
+                    state.full_content += state.pending_content
+                    state.pending_content = ""
+                
+                if state.full_content:
+                    self.ai_channel.log(self.ai_channel.name, state.full_content)
+                    try:
+                        await state.message_obj.edit(content=state.full_content)
+                    except Exception:
+                        try:
+                            await discord_channel.send(state.full_content)
+                        except:
+                            pass
 
     @commands.Cog.listener()
-    async def on_message_without_command(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+    async def on_message(self, message: discord.Message):
+        if message.author == self.bot.user:
             return
 
-        if self.config["require_mentions"] and not self.bot.user.mentioned_in(message):
+        # Target Channel restriction completely eliminated here. 
+        # Restrict execution solely to server administrators.
+        commands_authorized = False
+        if message.guild and message.author.guild_permissions.administrator:
+            commands_authorized = True
+
+        if message.content:
+            # Check reply status or mention mapping
+            mentioned = False
+            for member in message.mentions:
+                if member.id == self.bot.user.id:
+                    mentioned = True
+
+            # If replying directly to the bot, count it as a mention context
+            if message.reference and message.reference.cached_message:
+                if message.reference.cached_message.author.id == self.bot.user.id:
+                    mentioned = True
+
+            if not await self.config.require_mentions():
+                mentioned = True
+
+            if mentioned:
+                self.ai_channel.log("discord", f"<{message.author.name}> {message.clean_content}")
+
+                async with message.channel.typing():
+                    try:
+                        # Clean up raw message strings from mentions
+                        content = message.content.strip()
+                        for mention in message.raw_mentions:
+                            content = content.replace(str(mention), "")
+                            content = content.replace("<@>", "")
+                            content = content.strip()
+
+                        is_cmd = False
+                        cmd_prefix, cmd, args = await self.ai_channel.commands._extract_cmd(content)
+                        if cmd:
+                            is_cmd = content.lower().strip().startswith(cmd_prefix.lower())
+
+                        if is_cmd:
+                            content = f"{cmd_prefix}{' '.join(cmd)}"
+                        else:
+                            orig_content = str(content)
+                            content = ""
+
+                            group_chat = await self.config.enable_group_chat()
+
+                            if message.reference:
+                                replied_message = await message.channel.fetch_message(message.reference.message_id)
+                                replied_content = replied_message.content or ""
+                                replied_message_formatted = "> " + "\n> ".join(replied_content.split("\n"))
+                                content += f"in reply to:\n{replied_message_formatted}\n\n"
+
+                            if group_chat:
+                                cmd_prefix_temp = str(core.config.get("core", "cmd_prefix", default="/"))
+                                author_name = str(message.author.name).lstrip(cmd_prefix_temp)
+                                content += f"{author_name} said: {orig_content}"
+                            else:
+                                content += orig_content
+
+                    except Exception as e:
+                        return await message.channel.send(f"error while processing your request: {e}")
+
+                    try:
+                        if await self.config.use_message_streaming():
+                            response_obj = self.ai_channel.format_stream_for_text(
+                                self.ai_channel.send_stream(
+                                    {"role": "user", "content": content},
+                                    commands_authorized=commands_authorized
+                                ),
+                                chunk_size=MAX_CHARS
+                            )
+                            await self._stream_to_discord(response_obj, message.channel)
+                        else:
+                            response_obj = await self.ai_channel.send(
+                                {"role": "user", "content": content}, 
+                                commands_authorized=commands_authorized
+                            )
+
+                            if response_obj:
+                                response_content = response_obj.get("content")
+                                chunks = [response_content[i:i + MAX_CHARS] for i in range(0, len(response_content), MAX_CHARS)]
+
+                                for chunk in chunks:
+                                    await message.channel.send(
+                                        chunk, 
+                                        mention_author=await self.config.use_replies()
+                                    )
+                                    self.ai_channel.log("discord", f"<{message.guild.me.name}> {chunk}")
+                                    await asyncio.sleep(0.5)
+                    except Exception as e:
+                        err_msg = core.detail_error(e) if core.debug else str(e)
+                        return await message.channel.send(f"error while sending request to AI: {err_msg}")
+
+    async def push_message_to_channel(self, channel_id: int, message_dict: dict):
+        """Replaced the standalone on_push with an explicit cross-compatible driver hook."""
+        if not message_dict or message_dict.get("role") != "assistant":
             return
 
-        content = message.content.strip()
-        if not content:
-            return
+        content = message_dict.get("content")
+        chunks = [content[i:i + MAX_CHARS] for i in range(0, len(content), MAX_CHARS)]
 
-        # remove mentions
-        for m in message.raw_mentions:
-            content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
-
-        content = content.strip()
-        if not content:
-            return
-
-        channel_id = message.channel.id
-
-        # =====================================================
-        # COMMAND FLOW (FIXED ORDER)
-        # =====================================================
-        cmd_type, processed = self.handle_command(channel_id, content)
-
-        # -------------------------
-        # RESET (hard stop)
-        # -------------------------
-        if cmd_type == "reset":
-            self.sessions[channel_id] = []
-            await message.channel.send("✔ session reset")
-            return
-
-        # -------------------------
-        # NEW (soft reset, continues)
-        # -------------------------
-        if cmd_type == "new":
-            self.sessions[channel_id] = []
-            prompt = processed
-
-        # -------------------------
-        # COMPRESS (mutate memory, continue)
-        # -------------------------
-        elif cmd_type == "compress":
-            if channel_id in self.sessions:
-                self.sessions[channel_id] = self.sessions[channel_id][-10:]
-            prompt = processed
-
-        else:
-            prompt = processed
-
-        # =====================================================
-        # MEMORY INIT
-        # =====================================================
-        if channel_id not in self.sessions:
-            self.sessions[channel_id] = []
-
-        # ADD USER MESSAGE (ONLY AFTER COMMANDS ARE RESOLVED)
-        self.sessions[channel_id].append({
-            "role": "user",
-            "content": prompt
-        })
-
-        messages = self.sessions[channel_id][-20:]
-
-        # group chat formatting
-        if self.config["enable_group_chat"]:
-            messages[-1]["content"] = f"{message.author.display_name}: {prompt}"
-
-        # =====================================================
-        # CALL MODEL
-        # =====================================================
-        async with message.channel.typing():
-            try:
-                payload = {
-                    "model": self.model_name,
-                    "messages": messages,
-                    "stream": True
-                }
-
-                timeout = aiohttp.ClientTimeout(total=None, sock_read=60)
-
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.api_url, json=payload) as resp:
-
-                        if resp.status != 200:
-                            await message.channel.send(await resp.text())
-                            return
-
-                        async def stream():
-                            async for t in self._sse_stream(resp):
-                                yield t
-
-                        assistant_text = ""
-
-                        async def wrapped():
-                            nonlocal assistant_text
-                            async for t in stream():
-                                assistant_text += t.get("content", "")
-                                yield t
-
-                        await self._stream_to_discord(wrapped(), message.channel)
-
-                        self.sessions[channel_id].append({
-                            "role": "assistant",
-                            "content": assistant_text
-                        })
-
-            except Exception as e:
-                await message.channel.send(f"Error: {e}")
+        channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        if isinstance(channel, discord.TextChannel):
+            if channel.permissions_for(channel.guild.me).send_messages:
+                for chunk in chunks:
+                    await channel.send(chunk)
+                    await asyncio.sleep(0.5)
+            else:
+                log.error("Missing permissions to send push messages to configured channel.")
