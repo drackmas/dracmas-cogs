@@ -8,12 +8,6 @@ MAX_CHARS = 1900
 
 
 class Llm(commands.Cog):
-    """
-    Fully self-contained OpenLumara Discord cog.
-    No ai_channel dependency.
-    Includes local command routing for /reset /new /compress.
-    """
-
     def __init__(self, bot):
         self.bot = bot
 
@@ -23,28 +17,38 @@ class Llm(commands.Cog):
         self.config = {
             "require_mentions": True,
             "use_streaming": True,
-            "edit_interval": 1.0,
             "enable_group_chat": True
         }
 
-        # -----------------------------
-        # SIMPLE LOCAL SESSION SYSTEM
-        # -----------------------------
-        self.sessions = {}  # channel_id -> list[messages]
+        self.sessions = {}  # channel_id -> messages
 
-    # =========================================================
-    # COMMAND HANDLER (REPLACES core.channel.Channel)
-    # =========================================================
+    # =====================================================
+    # SAFE CHUNKING (CRITICAL FIX)
+    # =====================================================
+
+    def chunk_text(self, text: str):
+        return [text[i:i + MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
+
+    async def safe_send(self, channel, text: str):
+        for chunk in self.chunk_text(text):
+            await channel.send(chunk)
+
+    async def safe_edit_or_send(self, msg, channel, text: str):
+        chunks = self.chunk_text(text)
+
+        try:
+            await msg.edit(content=chunks[0])
+        except discord.HTTPException:
+            await channel.send(chunks[0])
+
+        for chunk in chunks[1:]:
+            await channel.send(chunk)
+
+    # =====================================================
+    # COMMAND HANDLER
+    # =====================================================
 
     def handle_command(self, channel_id, content):
-        """
-        Returns:
-        - ("reset", None)
-        - ("new", None)
-        - ("compress", messages)
-        - (None, normal_content)
-        """
-
         lower = content.strip().lower()
 
         if lower.startswith("/reset"):
@@ -56,50 +60,15 @@ class Llm(commands.Cog):
             return "new", None
 
         if lower.startswith("/compress"):
-            # simple compression: keep last 10 messages
             if channel_id in self.sessions:
                 self.sessions[channel_id] = self.sessions[channel_id][-10:]
             return "compress", None
 
         return None, content
 
-    # =========================================================
-    # STREAMING OUTPUT
-    # =========================================================
-
-    async def _stream_to_discord(self, stream, channel, trigger_message=None):
-        msg = await channel.send("...")
-
-        buffer = ""
-        full = ""
-
-        async for token in stream:
-            text = token.get("content")
-            if not isinstance(text, str):
-                continue
-
-            buffer += text
-
-            if len(full) + len(buffer) >= MAX_CHARS:
-                full += buffer
-                buffer = ""
-
-                try:
-                    await msg.edit(content=full)
-                except discord.HTTPException:
-                    msg = await channel.send(full)
-                    full = ""
-
-        full += buffer
-
-        try:
-            await msg.edit(content=full)
-        except:
-            await channel.send(full)
-
-    # =========================================================
+    # =====================================================
     # SSE STREAM PARSER
-    # =========================================================
+    # =====================================================
 
     async def _sse_stream(self, response):
         async for line in response.content:
@@ -116,14 +85,54 @@ class Llm(commands.Cog):
             try:
                 obj = json.loads(data)
                 delta = obj["choices"][0].get("delta", {})
+
+                # IMPORTANT: tool-call safety
+                if "tool_calls" in delta:
+                    yield {"content": json.dumps(delta["tool_calls"], indent=2)}
+                    continue
+
                 if "content" in delta:
                     yield {"content": delta["content"]}
+
             except:
                 continue
 
-    # =========================================================
+    # =====================================================
+    # STREAM OUTPUT (FIXED)
+    # =====================================================
+
+    async def _stream_to_discord(self, stream, channel):
+        msg = await channel.send("...")
+
+        buffer = ""
+        full = ""
+
+        async for token in stream:
+            text = token.get("content")
+            if not isinstance(text, str):
+                continue
+
+            buffer += text
+
+            # flush incrementally to avoid memory blowups
+            if len(full) + len(buffer) >= MAX_CHARS:
+                full += buffer
+                buffer = ""
+
+                await self.safe_edit_or_send(msg, channel, full)
+
+                # reset message reference after fallback send
+                msg = await channel.send("...")
+                full = ""
+
+        full += buffer
+
+        # FINAL SAFE OUTPUT (CRITICAL FIX)
+        await self.safe_edit_or_send(msg, channel, full)
+
+    # =====================================================
     # MAIN HANDLER
-    # =========================================================
+    # =====================================================
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
@@ -137,7 +146,7 @@ class Llm(commands.Cog):
         if not content:
             return
 
-        # remove mentions
+        # strip mentions
         for m in message.raw_mentions:
             content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
 
@@ -147,21 +156,14 @@ class Llm(commands.Cog):
 
         channel_id = message.channel.id
 
-        # =====================================================
-        # COMMAND ROUTING (LOCAL)
-        # =====================================================
         cmd_type, processed = self.handle_command(channel_id, content)
 
-        # If it's a command that doesn't go to LLM
         if cmd_type in ("reset", "new", "compress"):
             await message.channel.send(f"✔ {cmd_type} executed.")
             return
 
         prompt = processed
 
-        # =====================================================
-        # SESSION MEMORY
-        # =====================================================
         if channel_id not in self.sessions:
             self.sessions[channel_id] = []
 
@@ -170,11 +172,8 @@ class Llm(commands.Cog):
             "content": prompt
         })
 
-        messages = self.sessions[channel_id][-20:]  # context window
+        messages = self.sessions[channel_id][-20:]
 
-        # =====================================================
-        # GROUP CHAT
-        # =====================================================
         if self.config["enable_group_chat"]:
             messages[-1]["content"] = f"{message.author.display_name}: {prompt}"
 
@@ -195,20 +194,20 @@ class Llm(commands.Cog):
                             await message.channel.send(await resp.text())
                             return
 
-                        stream = self._sse_stream(resp)
+                        async def stream():
+                            async for t in self._sse_stream(resp):
+                                yield t
 
-                        # collect assistant response into memory
                         assistant_text = ""
 
                         async def wrapped():
                             nonlocal assistant_text
-                            async for t in stream:
+                            async for t in stream():
                                 assistant_text += t.get("content", "")
                                 yield t
 
                         await self._stream_to_discord(wrapped(), message.channel)
 
-                        # store assistant reply
                         self.sessions[channel_id].append({
                             "role": "assistant",
                             "content": assistant_text
