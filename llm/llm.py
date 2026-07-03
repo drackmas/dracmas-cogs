@@ -1,6 +1,9 @@
+import discord
+import aiohttp
 import asyncio
 import logging
-import discord
+from typing import Optional
+import json
 from redbot.core import commands, Config
 
 MAX_CHARS = 1900
