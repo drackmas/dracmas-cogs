@@ -8,6 +8,7 @@ MAX_CHARS = 1900
 
 
 class Llm(commands.Cog):
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -16,14 +17,13 @@ class Llm(commands.Cog):
 
         self.config = {
             "require_mentions": True,
-            "use_streaming": True,
             "enable_group_chat": True
         }
 
         self.sessions = {}  # channel_id -> messages
 
     # =====================================================
-    # SAFE CHUNKING (CRITICAL FIX)
+    # UTIL: SAFE CHUNKING
     # =====================================================
 
     def chunk_text(self, text: str):
@@ -52,16 +52,12 @@ class Llm(commands.Cog):
         lower = content.strip().lower()
 
         if lower.startswith("/reset"):
-            self.sessions[channel_id] = []
             return "reset", None
 
         if lower.startswith("/new"):
-            self.sessions[channel_id] = []
             return "new", None
 
         if lower.startswith("/compress"):
-            if channel_id in self.sessions:
-                self.sessions[channel_id] = self.sessions[channel_id][-10:]
             return "compress", None
 
         return None, content
@@ -86,7 +82,7 @@ class Llm(commands.Cog):
                 obj = json.loads(data)
                 delta = obj["choices"][0].get("delta", {})
 
-                # IMPORTANT: tool-call safety
+                # tool-call safety
                 if "tool_calls" in delta:
                     yield {"content": json.dumps(delta["tool_calls"], indent=2)}
                     continue
@@ -114,20 +110,17 @@ class Llm(commands.Cog):
 
             buffer += text
 
-            # flush incrementally to avoid memory blowups
             if len(full) + len(buffer) >= MAX_CHARS:
                 full += buffer
                 buffer = ""
 
                 await self.safe_edit_or_send(msg, channel, full)
 
-                # reset message reference after fallback send
                 msg = await channel.send("...")
                 full = ""
 
         full += buffer
 
-        # FINAL SAFE OUTPUT (CRITICAL FIX)
         await self.safe_edit_or_send(msg, channel, full)
 
     # =====================================================
@@ -146,7 +139,7 @@ class Llm(commands.Cog):
         if not content:
             return
 
-        # strip mentions
+        # remove mentions
         for m in message.raw_mentions:
             content = content.replace(f"<@{m}>", "").replace(f"<@!{m}>", "")
 
@@ -156,17 +149,44 @@ class Llm(commands.Cog):
 
         channel_id = message.channel.id
 
+        # =====================================================
+        # COMMAND FLOW (FIXED ORDER)
+        # =====================================================
         cmd_type, processed = self.handle_command(channel_id, content)
 
-        if cmd_type in ("reset", "new", "compress"):
-            await message.channel.send(f"✔ {cmd_type} executed.")
+        # -------------------------
+        # RESET (hard stop)
+        # -------------------------
+        if cmd_type == "reset":
+            self.sessions[channel_id] = []
+            await message.channel.send("✔ session reset")
             return
 
-        prompt = processed
+        # -------------------------
+        # NEW (soft reset, continues)
+        # -------------------------
+        if cmd_type == "new":
+            self.sessions[channel_id] = []
+            prompt = processed
 
+        # -------------------------
+        # COMPRESS (mutate memory, continue)
+        # -------------------------
+        elif cmd_type == "compress":
+            if channel_id in self.sessions:
+                self.sessions[channel_id] = self.sessions[channel_id][-10:]
+            prompt = processed
+
+        else:
+            prompt = processed
+
+        # =====================================================
+        # MEMORY INIT
+        # =====================================================
         if channel_id not in self.sessions:
             self.sessions[channel_id] = []
 
+        # ADD USER MESSAGE (ONLY AFTER COMMANDS ARE RESOLVED)
         self.sessions[channel_id].append({
             "role": "user",
             "content": prompt
@@ -174,9 +194,13 @@ class Llm(commands.Cog):
 
         messages = self.sessions[channel_id][-20:]
 
+        # group chat formatting
         if self.config["enable_group_chat"]:
             messages[-1]["content"] = f"{message.author.display_name}: {prompt}"
 
+        # =====================================================
+        # CALL MODEL
+        # =====================================================
         async with message.channel.typing():
             try:
                 payload = {
