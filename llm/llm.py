@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import discord
-import core
 from redbot.core import commands, Config
 
 MAX_CHARS = 1900
