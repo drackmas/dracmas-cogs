@@ -1,7 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
-
 import discord
 import core
 from redbot.core import commands, Config
@@ -35,14 +33,14 @@ class Llm(commands.Cog):
         self.config.register_global(**default_global)
 
     async def cog_load(self):
-        """Native Red Cog lifecycle hook for initialization."""
-        log.info("OpenLumara AI Cog logged in.")
+        """Native Red Cog lifecycle hook acting as the old 'on_ready'."""
+        self.ai_channel.log("discord", "logged in.")
         startup_message = await self.config.startup_message()
         if startup_message:
             await self.ai_channel.push(startup_message)
 
     async def cog_unload(self):
-        """Native Red Cog lifecycle hook for cleanup/shutdown."""
+        """Native Red Cog lifecycle hook acting as the old 'on_shutdown'."""
         shutdown_message = await self.config.shutdown_message()
         if shutdown_message:
             await self.ai_channel.push(shutdown_message)
@@ -127,20 +125,19 @@ class Llm(commands.Cog):
         if message.author == self.bot.user:
             return
 
-        # Target Channel restriction completely eliminated here. 
-        # Restrict execution solely to server administrators.
+        # Target channel restrictions removed entirely.
+        # Authorization maps directly to Guild Administrator permissions.
         commands_authorized = False
         if message.guild and message.author.guild_permissions.administrator:
             commands_authorized = True
 
         if message.content:
-            # Check reply status or mention mapping
             mentioned = False
             for member in message.mentions:
                 if member.id == self.bot.user.id:
                     mentioned = True
 
-            # If replying directly to the bot, count it as a mention context
+            # If replying directly to the bot, inherit explicit conversation engagement
             if message.reference and message.reference.cached_message:
                 if message.reference.cached_message.author.id == self.bot.user.id:
                     mentioned = True
@@ -220,19 +217,25 @@ class Llm(commands.Cog):
                         err_msg = core.detail_error(e) if core.debug else str(e)
                         return await message.channel.send(f"error while sending request to AI: {err_msg}")
 
-    async def push_message_to_channel(self, channel_id: int, message_dict: dict):
-        """Replaced the standalone on_push with an explicit cross-compatible driver hook."""
-        if not message_dict or message_dict.get("role") != "assistant":
-            return
+    async def on_push(self, message: dict, target_channel_id: int):
+        """Faithful reproduction of the framework's external push loop."""
+        if not message or message.get("role") != "assistant":
+            return None
 
-        content = message_dict.get("content")
+        content = message.get("content")
+        self.ai_channel.log(f"{self.ai_channel.name} push", content)
         chunks = [content[i:i + MAX_CHARS] for i in range(0, len(content), MAX_CHARS)]
 
-        channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+        try:
+            channel = self.bot.get_channel(target_channel_id) or await self.bot.fetch_channel(target_channel_id)
+        except Exception:
+            self.ai_channel.log(self.ai_channel.name, f"Error while sending push message: Could not fetch channel context {target_channel_id}")
+            return
+
         if isinstance(channel, discord.TextChannel):
             if channel.permissions_for(channel.guild.me).send_messages:
                 for chunk in chunks:
                     await channel.send(chunk)
                     await asyncio.sleep(0.5)
             else:
-                log.error("Missing permissions to send push messages to configured channel.")
+                self.ai_channel.log(self.ai_channel.name, "Error while sending push message: Discord bot does not have required permissions.")
